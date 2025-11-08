@@ -1,5 +1,6 @@
-[server]
-headless = true
-enableCORS = false
-enableXsrfProtection = true
-port = 8501
+[theme]
+primaryColor="#4f46e5"          # indigo-600
+backgroundColor="#0b1020"       # deep navy
+secondaryBackgroundColor="#121a2e"
+textColor="#e5e7eb"             # gray-200
+font="sans serif"

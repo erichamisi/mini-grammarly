@@ -1,10 +1,10 @@
 streamlit==1.51.0
 language-tool-python==2.7.1
 textstat==0.7.4
-# Streamlit pulls pandas; keep it on 2.x for wheel availability
-pandas>=2.0,<3.0
-
-# Optional paraphraser (comment these out if you don’t need rewrite feature)
-# transformers>=4.44.0
-# sentencepiece>=0.2.0
-# torch>=2.3.0
+pandas==2.3.3
+numpy==2.3.4
+requests==2.32.5
+pdfplumber==0.11.4
+python-docx==1.1.2
+reportlab==4.2.5
+scikit-learn==1.5.2
