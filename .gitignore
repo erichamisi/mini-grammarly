@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.env
+
+# Streamlit
+.streamlit/secrets.toml
+
+# HF cache (if you use transformers)
+.cache/
+huggingface/
