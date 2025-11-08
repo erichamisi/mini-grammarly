@@ -6,7 +6,6 @@ import os
 import sys
 import warnings
 import importlib.util
-import subprocess
 from dataclasses import dataclass
 from typing import List, Tuple, Optional
 
@@ -26,33 +25,19 @@ except Exception:
     textstat = None
 
 # --------------------------------------------------------------------
-# Robust import of language_tool_python (optional)
-#   - auto-install if missing (comment _ensure_pkg(...) to disable)
-#   - surface import errors (shown in sidebar)
-#   - if import fails, we'll **fallback to HTTP API** (see below)
+# language_tool_python (optional; app will work without it via HTTP)
 # --------------------------------------------------------------------
-def _ensure_pkg(pkg: str, version: Optional[str] = None):
-    """Install a package at runtime if missing, then rerun the app."""
-    if importlib.util.find_spec(pkg) is None:
-        spec = f"{pkg.replace('_','-')}=={version}" if version else pkg.replace('_','-')
-        try:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", spec])
-            # Reload app after install
-            (st.rerun if hasattr(st, "rerun") else st.experimental_rerun)()
-        except Exception as _e:
-            st.sidebar.error(f"Auto-install failed for {spec}: {_e!r}")
-
-# Comment out to disable auto-install:
-_ensure_pkg("language_tool_python", "2.7.1")
-
 try:
     import language_tool_python as lt
-    from language_tool_python.utils import RateLimitError
     lt_error = None
 except Exception as e:
     lt = None
-    RateLimitError = Exception  # safe placeholder
     lt_error = repr(e)
+
+# Our tiny rate-limit exception for HTTP fallback
+class APIRateLimit(Exception):
+    """Raised when HTTP 429 (rate limit) is returned."""
+    pass
 
 # --------------------------------------------------------------------
 # Secrets helper (works with/without .streamlit/secrets.toml)
@@ -63,7 +48,7 @@ def _get_secret(name: str, default: str = "") -> str:
     except Exception:
         return os.environ.get(name, default)
 
-REMOTE = _get_secret("LT_REMOTE_SERVER_URL", "")  # e.g. https://your-lt-server.example.com
+REMOTE = _get_secret("LT_REMOTE_SERVER_URL", "")  # e.g., https://your-lt-server.example.com
 
 # --------------------------------------------------------------------
 # Paraphraser (lazy-loaded; no 800MB download on startup)
@@ -78,7 +63,7 @@ def _ensure_paraphraser() -> bool:
     if _paraphraser is not None and _paraphraser_tokenizer is not None:
         return True
     try:
-        from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+        from transformers import AutoModelForSeq2SeqLM, AutoTokenizer  # type: ignore
         _paraphraser_tokenizer = AutoTokenizer.from_pretrained(_PARA_MODEL)
         _paraphraser = AutoModelForSeq2SeqLM.from_pretrained(_PARA_MODEL)
         return True
@@ -164,18 +149,17 @@ def _lt_check_http(text: str, lang_code: str, remote_url: Optional[str]) -> Tupl
         "text": text,
         "language": lang_code,
     }
-    # You may add 'enabledOnly': 'false' or 'level': 'default' as needed.
     r = requests.post(base, data=data, timeout=30)
     if r.status_code == 429:
         # Rate limited on public API
-        raise RateLimitError("Public API rate limit hit") if lt else Exception("Public API rate limit hit")
+        raise APIRateLimit("Public API rate limit hit")
     r.raise_for_status()
     js = r.json()
     matches = js.get("matches", [])
 
     issues: List[Issue] = []
     corrected = list(text)
-    # Build and apply fixes (first suggestion) from the end to avoid offset shift
+    # Apply first suggestion from the end to avoid offset shift
     for m in sorted(matches, key=lambda x: x.get("offset", 0), reverse=True):
         offset = m.get("offset", 0)
         length = m.get("length", 0)
@@ -189,7 +173,7 @@ def _lt_check_http(text: str, lang_code: str, remote_url: Optional[str]) -> Tupl
             corrected[offset:offset+length] = list(suggestion)
 
     corrected_text = "".join(corrected)
-    return corrected_text, list(reversed(issues))  # reverse to original order for display
+    return corrected_text, list(reversed(issues))  # reverse for display order
 
 # -------- Choose tool based on availability/engine ----------
 def get_tool(lang_code: str):
@@ -261,7 +245,6 @@ def highlight_diff(before: str, after: str) -> str:
 def paraphrase(text: str, beams: int = 5, max_len: int = 256, style_hint: str = "") -> str:
     if not _ensure_paraphraser():
         return "(Paraphraser unavailable — install transformers to enable this feature.)"
-    from transformers import AutoModelForSeq2SeqLM  # type: ignore
     prefix = "paraphrase: " + (style_hint + " " if style_hint else "") + text
     inputs = _paraphraser_tokenizer.encode(prefix, return_tensors="pt", truncation=True)
     outputs = _paraphraser.generate(
@@ -279,7 +262,7 @@ def paraphrase(text: str, beams: int = 5, max_len: int = 256, style_hint: str = 
 if run and text.strip():
     try:
         fixed, issues = check_text_cached(text, lang_code, ENGINE, REMOTE)
-    except RateLimitError:
+    except APIRateLimit:
         st.error(
             "You’ve hit the free LanguageTool API rate limit.\n\n"
             "• Try again later (Public API), or\n"
@@ -355,5 +338,5 @@ if stats_btn and text.strip():
 st.caption(
     "Engine tips: Public API is easiest but rate-limited. Local server needs Java. "
     "Set LT_REMOTE_SERVER_URL to use your own remote LanguageTool server.\n"
-    "If language_tool_python import fails, the app now falls back to HTTP automatically."
+    "If language_tool_python import fails, the app falls back to HTTP automatically."
 )
