@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import List, Tuple, Optional
 
 import streamlit as st
+import requests
 
 # --------------------------------------------------------------------
 # Housekeeping
@@ -25,9 +26,10 @@ except Exception:
     textstat = None
 
 # --------------------------------------------------------------------
-# Robust import of language_tool_python
-#   - auto-install if missing (you can comment out _ensure_pkg(...) if you prefer)
-#   - surface real import errors in the sidebar
+# Robust import of language_tool_python (optional)
+#   - auto-install if missing (comment _ensure_pkg(...) to disable)
+#   - surface import errors (shown in sidebar)
+#   - if import fails, we'll **fallback to HTTP API** (see below)
 # --------------------------------------------------------------------
 def _ensure_pkg(pkg: str, version: Optional[str] = None):
     """Install a package at runtime if missing, then rerun the app."""
@@ -35,13 +37,12 @@ def _ensure_pkg(pkg: str, version: Optional[str] = None):
         spec = f"{pkg.replace('_','-')}=={version}" if version else pkg.replace('_','-')
         try:
             subprocess.check_call([sys.executable, "-m", "pip", "install", spec])
-            st.toast(f"Installed {spec}. Reloading…", icon="✅")
-            # st.rerun introduced in recent Streamlit; fall back to experimental if needed
+            # Reload app after install
             (st.rerun if hasattr(st, "rerun") else st.experimental_rerun)()
         except Exception as _e:
             st.sidebar.error(f"Auto-install failed for {spec}: {_e!r}")
 
-# Comment out the next line if you do NOT want auto-install behavior in the cloud.
+# Comment out to disable auto-install:
 _ensure_pkg("language_tool_python", "2.7.1")
 
 try:
@@ -62,7 +63,7 @@ def _get_secret(name: str, default: str = "") -> str:
     except Exception:
         return os.environ.get(name, default)
 
-REMOTE = _get_secret("LT_REMOTE_SERVER_URL", "")
+REMOTE = _get_secret("LT_REMOTE_SERVER_URL", "")  # e.g. https://your-lt-server.example.com
 
 # --------------------------------------------------------------------
 # Paraphraser (lazy-loaded; no 800MB download on startup)
@@ -152,8 +153,47 @@ class Issue:
     context: str
     replacements: List[str]
 
+# -------- HTTP fallback client (no language_tool_python needed) -------
+def _lt_check_http(text: str, lang_code: str, remote_url: Optional[str]) -> Tuple[str, List[Issue]]:
+    """
+    Call LanguageTool /v2/check via HTTP.
+    Uses remote_url if provided, otherwise the public API.
+    """
+    base = (remote_url.rstrip("/") if remote_url else "https://api.languagetool.org") + "/v2/check"
+    data = {
+        "text": text,
+        "language": lang_code,
+    }
+    # You may add 'enabledOnly': 'false' or 'level': 'default' as needed.
+    r = requests.post(base, data=data, timeout=30)
+    if r.status_code == 429:
+        # Rate limited on public API
+        raise RateLimitError("Public API rate limit hit") if lt else Exception("Public API rate limit hit")
+    r.raise_for_status()
+    js = r.json()
+    matches = js.get("matches", [])
+
+    issues: List[Issue] = []
+    corrected = list(text)
+    # Build and apply fixes (first suggestion) from the end to avoid offset shift
+    for m in sorted(matches, key=lambda x: x.get("offset", 0), reverse=True):
+        offset = m.get("offset", 0)
+        length = m.get("length", 0)
+        message = m.get("message", "")
+        rule_id = (m.get("rule") or {}).get("id", "Rule")
+        context = (m.get("context") or {}).get("text", "")
+        repls = [rep.get("value") for rep in m.get("replacements", []) if "value" in rep]
+        issues.append(Issue(rule=rule_id, message=message, offset=offset, length=length, context=context, replacements=repls))
+        if repls:
+            suggestion = repls[0]
+            corrected[offset:offset+length] = list(suggestion)
+
+    corrected_text = "".join(corrected)
+    return corrected_text, list(reversed(issues))  # reverse to original order for display
+
+# -------- Choose tool based on availability/engine ----------
 def get_tool(lang_code: str):
-    """Pick LT client based on engine choice or remote."""
+    """Return a working checker or None. If lt import failed, we use HTTP fallback in check_text()."""
     if lt is None:
         return None
     try:
@@ -169,34 +209,35 @@ def get_tool(lang_code: str):
         return None
 
 def check_text(text: str, lang_code: str) -> Tuple[str, List[Issue]]:
-    tool = get_tool(lang_code)
-    if tool is None:
-        return text, []
-
-    matches = tool.check(text)
-    issues: List[Issue] = []
-    for m in matches:
-        repl = [r.value for r in getattr(m, "replacements", [])] or []
-        issues.append(
-            Issue(
-                rule=getattr(m.rule, "id", "Rule"),
-                message=m.message,
-                offset=m.offset,
-                length=m.errorLength,
-                context=m.context,
-                replacements=repl,
-            )
-        )
-
-    # Auto-apply first suggestion for a quick preview
-    corrected = list(text)
-    for m in sorted(matches, key=lambda x: x.offset, reverse=True):
-        if getattr(m, "replacements", None):
-            suggestion = m.replacements[0].value
-            start, end = m.offset, m.offset + m.errorLength
-            corrected[start:end] = list(suggestion)
-    corrected_text = "".join(corrected)
-    return corrected_text, issues
+    # Preferred: use language_tool_python if it imported AND a client is available
+    if lt is not None:
+        tool = get_tool(lang_code)
+        if tool is not None:
+            matches = tool.check(text)
+            issues: List[Issue] = []
+            for m in matches:
+                repl = [r.value for r in getattr(m, "replacements", [])] or []
+                issues.append(
+                    Issue(
+                        rule=getattr(m.rule, "id", "Rule"),
+                        message=m.message,
+                        offset=m.offset,
+                        length=m.errorLength,
+                        context=m.context,
+                        replacements=repl,
+                    )
+                )
+            corrected = list(text)
+            for m in sorted(matches, key=lambda x: x.offset, reverse=True):
+                if getattr(m, "replacements", None):
+                    suggestion = m.replacements[0].value
+                    start, end = m.offset, m.offset + m.errorLength
+                    corrected[start:end] = list(suggestion)
+            corrected_text = "".join(corrected)
+            return corrected_text, issues
+    # Fallback: HTTP API (Public or Remote)
+    remote_url = REMOTE if ENGINE.startswith("Remote") else None
+    return _lt_check_http(text, lang_code, remote_url)
 
 @st.cache_data(show_spinner=False, ttl=300)
 def check_text_cached(text: str, lang_code: str, engine_key: str, remote_key: str):
@@ -220,6 +261,7 @@ def highlight_diff(before: str, after: str) -> str:
 def paraphrase(text: str, beams: int = 5, max_len: int = 256, style_hint: str = "") -> str:
     if not _ensure_paraphraser():
         return "(Paraphraser unavailable — install transformers to enable this feature.)"
+    from transformers import AutoModelForSeq2SeqLM  # type: ignore
     prefix = "paraphrase: " + (style_hint + " " if style_hint else "") + text
     inputs = _paraphraser_tokenizer.encode(prefix, return_tensors="pt", truncation=True)
     outputs = _paraphraser.generate(
@@ -240,9 +282,9 @@ if run and text.strip():
     except RateLimitError:
         st.error(
             "You’ve hit the free LanguageTool API rate limit.\n\n"
-            "• Switch engine to **Local server** (requires Java) on your PC\n"
-            "• Or set **LT_REMOTE_SERVER_URL** (Remote server)\n"
-            "• Or try again later"
+            "• Try again later (Public API), or\n"
+            "• Set LT_REMOTE_SERVER_URL for your own server, or\n"
+            "• Use Local server on your PC (Java required)."
         )
         st.stop()
     except Exception as e:
@@ -250,9 +292,7 @@ if run and text.strip():
         st.error("Grammar check failed:\n\n" + traceback.format_exc())
         st.stop()
 
-    if lt is None:
-        st.warning("language-tool-python is not available.")
-    elif not issues:
+    if not issues:
         st.success("No issues found.")
 
     st.subheader("Suggested fixes (auto-applied preview)")
@@ -315,5 +355,5 @@ if stats_btn and text.strip():
 st.caption(
     "Engine tips: Public API is easiest but rate-limited. Local server needs Java. "
     "Set LT_REMOTE_SERVER_URL to use your own remote LanguageTool server.\n"
-    "To silence the Windows symlink warning from huggingface_hub: setx HF_HUB_DISABLE_SYMLINKS_WARNING 1"
+    "If language_tool_python import fails, the app now falls back to HTTP automatically."
 )
