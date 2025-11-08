@@ -3,9 +3,7 @@
 
 import difflib
 import os
-import sys
 import warnings
-import importlib.util
 from dataclasses import dataclass
 from typing import List, Tuple, Optional
 
@@ -25,7 +23,7 @@ except Exception:
     textstat = None
 
 # --------------------------------------------------------------------
-# language_tool_python (optional; app will work without it via HTTP)
+# language_tool_python (optional; app works without it via HTTP fallback)
 # --------------------------------------------------------------------
 try:
     import language_tool_python as lt
@@ -38,6 +36,15 @@ except Exception as e:
 class APIRateLimit(Exception):
     """Raised when HTTP 429 (rate limit) is returned."""
     pass
+
+# Replacement normalizer for differing LT return types
+def _rep_value(x):
+    """Return replacement text from either an object with .value or a dict {'value': ...}."""
+    if hasattr(x, "value"):
+        return x.value
+    if isinstance(x, dict):
+        return x.get("value", "")
+    return str(x or "")
 
 # --------------------------------------------------------------------
 # Secrets helper (works with/without .streamlit/secrets.toml)
@@ -200,25 +207,32 @@ def check_text(text: str, lang_code: str) -> Tuple[str, List[Issue]]:
             matches = tool.check(text)
             issues: List[Issue] = []
             for m in matches:
-                repl = [r.value for r in getattr(m, "replacements", [])] or []
+                # replacements may be objects or dicts depending on lt version
+                rep_list = getattr(m, "replacements", []) or []
+                repl = [_rep_value(r) for r in rep_list]
                 issues.append(
                     Issue(
-                        rule=getattr(m.rule, "id", "Rule"),
-                        message=m.message,
-                        offset=m.offset,
-                        length=m.errorLength,
-                        context=m.context,
+                        rule=getattr(getattr(m, "rule", None), "id", "Rule"),
+                        message=getattr(m, "message", ""),
+                        offset=getattr(m, "offset", 0),
+                        length=getattr(m, "errorLength", 0),
+                        context=getattr(m, "context", ""),
                         replacements=repl,
                     )
                 )
+
+            # Auto-apply first suggestion for a quick preview
             corrected = list(text)
-            for m in sorted(matches, key=lambda x: x.offset, reverse=True):
-                if getattr(m, "replacements", None):
-                    suggestion = m.replacements[0].value
-                    start, end = m.offset, m.offset + m.errorLength
+            for m in sorted(matches, key=lambda x: getattr(x, "offset", 0), reverse=True):
+                rep_list = getattr(m, "replacements", []) or []
+                if rep_list:
+                    suggestion = _rep_value(rep_list[0])
+                    start = getattr(m, "offset", 0)
+                    end = start + getattr(m, "errorLength", 0)
                     corrected[start:end] = list(suggestion)
             corrected_text = "".join(corrected)
             return corrected_text, issues
+
     # Fallback: HTTP API (Public or Remote)
     remote_url = REMOTE if ENGINE.startswith("Remote") else None
     return _lt_check_http(text, lang_code, remote_url)
