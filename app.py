@@ -107,9 +107,17 @@ def paraphrase_api(text: str, tone: str = "", model: str = "Vamsi/T5_Paraphrase_
 
     url = f"https://api-inference.huggingface.co/models/{model}"
     headers = {"Authorization": f"Bearer {token}"}
-    tone_map = {"Formal": "Rewrite formally:", "Friendly": "Rewrite in a friendly tone:", "Concise": "Rewrite concisely:", "Neutral": ""}
+    tone_map = {
+        "Formal": "Rewrite formally:",
+        "Friendly": "Rewrite in a friendly tone:",
+        "Concise": "Rewrite concisely:",
+        "Neutral": "",
+    }
     style = tone_map.get(tone or "Neutral", "")
-    payload = {"inputs": f"paraphrase: {style} {text}".strip(), "options": {"wait_for_model": True}}
+    payload = {
+        "inputs": f"paraphrase: {style} {text}".strip(),
+        "options": {"wait_for_model": True},
+    }
 
     for _ in range(3):
         r = requests.post(url, headers=headers, data=json.dumps(payload), timeout=60)
@@ -170,10 +178,13 @@ SUPPORTED_LANGS = {
 with st.sidebar:
     st.header("Settings")
     st.caption(
-        f"LangTool pkg: {'✅' if lt else '❌'}" + (f" (import error: {lt_error})" if lt_error else "")
+        f"LangTool pkg: {'✅' if lt else '❌'}"
+        + (f" (import error: {lt_error})" if lt_error else "")
     )
     st.caption(f"HF API token: {'✅' if HF_TOKEN else '❌'}")
-    st.caption("Remote LT server: " + ("✅ (from secret/env)" if REMOTE else "❌ (using Public/Local)"))
+    st.caption(
+        "Remote LT server: " + ("✅ (from secret/env)" if REMOTE else "❌ (using Public/Local)")
+    )
 
     lang = st.selectbox("Language", list(SUPPORTED_LANGS.keys()), index=0)
     lang_code = SUPPORTED_LANGS[lang]
@@ -186,7 +197,9 @@ with st.sidebar:
     )
 
     do_rewrite = st.checkbox("Enable paraphrase/rewrite", value=False)
-    target_tone = st.selectbox("Target tone (rewrite)", ["Neutral", "Formal", "Friendly", "Concise"], index=0)
+    target_tone = st.selectbox(
+        "Target tone (rewrite)", ["Neutral", "Formal", "Friendly", "Concise"], index=0
+    )
     beams = st.slider("Paraphrase quality (beams, local only)", 2, 8, 5)
 
     st.divider()
@@ -245,7 +258,7 @@ def _lt_check_http(text: str, lang_code: str, remote_url: Optional[str]) -> Tupl
 
     base = (remote_url.rstrip("/") if remote_url else "https://api.languagetool.org") + "/v2/check"
     headers = {
-        "User-Agent": "mini-grammarly/1.1 (streamlit)",
+        "User-Agent": "mini-grammarly/1.2 (streamlit)",
         "Accept": "application/json",
     }
 
@@ -253,7 +266,7 @@ def _lt_check_http(text: str, lang_code: str, remote_url: Optional[str]) -> Tupl
         data = {
             "text": payload_text,
             "language": language_value,
-            "enabledOnly": "true",
+            "level": "default",  # don't send enabledOnly without enabledRules/categories
         }
         r = requests.post(base, data=data, headers=headers, timeout=30)
         if r.status_code == 429:
@@ -267,7 +280,9 @@ def _lt_check_http(text: str, lang_code: str, remote_url: Optional[str]) -> Tupl
         try:
             return r.json()
         except Exception:
-            raise requests.HTTPError(f"Unexpected response from LanguageTool: {r.text[:200]}", response=r)
+            raise requests.HTTPError(
+                f"Unexpected response from LanguageTool: {r.text[:200]}", response=r
+            )
 
     # try chosen language; on 400 retry fallbacks
     try_order = [lang_code]
@@ -288,10 +303,19 @@ def _lt_check_http(text: str, lang_code: str, remote_url: Optional[str]) -> Tupl
                 rule_id = (m.get("rule") or {}).get("id", "Rule")
                 context = (m.get("context") or {}).get("text", "")
                 repls = [rep.get("value") for rep in m.get("replacements", []) if "value" in rep]
-                issues.append(Issue(rule=rule_id, message=message, offset=offset, length=length, context=context, replacements=repls))
+                issues.append(
+                    Issue(
+                        rule=rule_id,
+                        message=message,
+                        offset=offset,
+                        length=length,
+                        context=context,
+                        replacements=repls,
+                    )
+                )
                 if repls:
                     suggestion = repls[0]
-                    corrected[offset:offset+length] = list(suggestion)
+                    corrected[offset : offset + length] = list(suggestion)
             corrected_text = "".join(corrected)
             return corrected_text, list(reversed(issues))
         except requests.HTTPError as e:
@@ -299,7 +323,9 @@ def _lt_check_http(text: str, lang_code: str, remote_url: Optional[str]) -> Tupl
             if e.response is None or e.response.status_code not in (400,):
                 raise
 
-    raise last_err if last_err else requests.HTTPError("LanguageTool request failed with unknown error")
+    raise last_err if last_err else requests.HTTPError(
+        "LanguageTool request failed with unknown error"
+    )
 
 def get_tool(lang_code: str):
     if lt is None:
@@ -318,7 +344,7 @@ def get_tool(lang_code: str):
 def check_text(text: str, lang_code: str) -> Tuple[str, List[Issue]]:
     """
     Grammar check with three modes:
-      - Public API: direct HTTP (avoids 426/JSON issues)
+      - Public API: direct HTTP
       - Remote server: HTTP to your LT server (LT_REMOTE_SERVER_URL)
       - Local server: try language_tool_python (Java), else HTTP
     """
@@ -617,8 +643,16 @@ if run and text.strip():
         for i, it in enumerate(issues, 1):
             bad = text[it.offset : it.offset + it.length]
             top_suggestion = it.replacements[0] if it.replacements else "(none)"
-            rows.append({"#": i, "Rule": it.rule, "Message": it.message, "Text": bad, "Suggestion": top_suggestion,
-                         "Pos": f"{it.offset}:{it.offset + it.length}"})
+            rows.append(
+                {
+                    "#": i,
+                    "Rule": it.rule,
+                    "Message": it.message,
+                    "Text": bad,
+                    "Suggestion": top_suggestion,
+                    "Pos": f"{it.offset}:{it.offset + it.length}",
+                }
+            )
         try:
             import pandas as pd
             st.dataframe(pd.DataFrame(rows), use_container_width=True)
@@ -635,7 +669,11 @@ if rewrite_btn and text.strip():
     else:
         out = paraphrase_api(text, tone=target_tone)
         if out.startswith("("):  # API not configured; fallback to local if available
-            style_hint = {"Formal":"Rewrite formally:", "Friendly":"Rewrite in a friendly tone:", "Concise":"Rewrite concisely:"}.get(target_tone, "")
+            style_hint = {
+                "Formal": "Rewrite formally:",
+                "Friendly": "Rewrite in a friendly tone:",
+                "Concise": "Rewrite concisely:",
+            }.get(target_tone, "")
             out = paraphrase_local(text, beams=beams, style_hint=style_hint)
         st.subheader("Paraphrased / Rewritten")
         st.write(out)
@@ -688,7 +726,9 @@ if plag_btn and enable_plag and text.strip():
     else:
         try:
             import pandas as pd
-            df = pd.DataFrame([{"Source": r["Source"], "Similarity": r["Similarity"], "Overlaps": r["OverlapsFound"]} for r in results])
+            df = pd.DataFrame(
+                [{"Source": r["Source"], "Similarity": r["Similarity"], "Overlaps": r["OverlapsFound"]} for r in results]
+            )
             st.dataframe(df, use_container_width=True)
             csv = df.to_csv(index=False).encode("utf-8")
             st.download_button("Download CSV report", csv, "plagiarism_report.csv", "text/csv")
@@ -707,17 +747,26 @@ if plag_btn and enable_plag and text.strip():
         colA, colB = st.columns(2)
         with colA:
             docx_bytes = _build_docx_report(text, results)
-            st.download_button("Download DOCX report", docx_bytes, "plagiarism_report.docx",
-                               "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                               disabled=(not docx_bytes))
+            st.download_button(
+                "Download DOCX report",
+                docx_bytes,
+                "plagiarism_report.docx",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                disabled=(not docx_bytes),
+            )
         with colB:
             pdf_bytes = _build_pdf_report(text, results)
-            st.download_button("Download PDF report", pdf_bytes, "plagiarism_report.pdf", "application/pdf",
-                               disabled=(not pdf_bytes))
+            st.download_button(
+                "Download PDF report",
+                pdf_bytes,
+                "plagiarism_report.pdf",
+                "application/pdf",
+                disabled=(not pdf_bytes),
+            )
 
 st.markdown(
     '<div class="app-footer">Made with Streamlit · LanguageTool · Hugging Face · scikit-learn</div>',
-    unsafe_allow_html=True
+    unsafe_allow_html=True,
 )
 
 st.caption(
