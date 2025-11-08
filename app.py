@@ -1,4 +1,4 @@
-# app.py — Mini-Grammarly (Streamlit) with Plagiarism Checker + DOCX/PDF export
+# app.py — Mini-Grammarly (Streamlit) with Plagiarism Checker + Modern UI
 # Run locally:  streamlit run app.py
 
 import difflib
@@ -14,13 +14,13 @@ from typing import List, Tuple, Optional
 import streamlit as st
 import requests
 
-# --------------------------------------------------------------------
-# Housekeeping
-# --------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Page + housekeeping
+# -----------------------------------------------------------------------------
 st.set_page_config(page_title="Mini-Grammarly", page_icon="📝")
-warnings.filterwarnings("ignore", message="pkg_resources is deprecated")  # quiet textstat log noise
+warnings.filterwarnings("ignore", message="pkg_resources is deprecated")
 
-# ---- CSS injection ----
+# ---- CSS injection (Bootstrap-like look) ----
 def _load_css():
     path = os.path.join(os.path.dirname(__file__), "assets", "styles.css")
     try:
@@ -31,14 +31,12 @@ def _load_css():
 
 _load_css()
 
-
-# Optional libs (readability)
+# Optional libs for readability and exports
 try:
     import textstat
 except Exception:
     textstat = None
 
-# Optional libs (plagiarism local)
 try:
     import pdfplumber
 except Exception:
@@ -66,9 +64,7 @@ try:
 except Exception:
     _sk_ok = False
 
-# --------------------------------------------------------------------
-# language_tool_python (optional; app works without it via HTTP fallback)
-# --------------------------------------------------------------------
+# language_tool_python (optional for Local server mode)
 try:
     import language_tool_python as lt
     lt_error = None
@@ -76,62 +72,49 @@ except Exception as e:
     lt = None
     lt_error = repr(e)
 
-# Our tiny rate-limit exception for HTTP fallback
+# Small exception for public API rate limit
 class APIRateLimit(Exception):
-    """Raised when HTTP 429 (rate limit) is returned."""
     pass
 
-# Replacement normalizer for differing LT return types
 def _rep_value(x):
-    """Return replacement text from either an object with .value or a dict {'value': ...}."""
+    """Return replacement string from either object w/.value or dict {'value':...}."""
     if hasattr(x, "value"):
         return x.value
     if isinstance(x, dict):
         return x.get("value", "")
     return str(x or "")
 
-# --------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # Secrets helper (works with/without .streamlit/secrets.toml)
-# --------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 def _get_secret(name: str, default: str = "") -> str:
     try:
         return st.secrets.get(name, default)
     except Exception:
         return os.environ.get(name, default)
 
-REMOTE = _get_secret("LT_REMOTE_SERVER_URL", "")  # e.g., https://your-lt-server.example.com
-HF_TOKEN = _get_secret("HF_API_TOKEN", "")        # for paraphraser API (optional)
+REMOTE = _get_secret("LT_REMOTE_SERVER_URL", "")
+HF_TOKEN = _get_secret("HF_API_TOKEN", "")
+PLAG_API_KEY = _get_secret("PLAG_API_KEY", "")
 
-# --------------------------------------------------------------------
-# Paraphrasers
-#   A) Hugging Face Inference API (recommended for Cloud; no heavy deps)
-#   B) Local Transformers (optional; requires transformers/sentencepiece/torch)
-# --------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Paraphrasing (API first; optional local)
+# -----------------------------------------------------------------------------
 def paraphrase_api(text: str, tone: str = "", model: str = "Vamsi/T5_Paraphrase_Paws") -> str:
-    """Hugging Face Inference API paraphrase (no local transformers needed)."""
     token = HF_TOKEN
     if not token:
         return "(Paraphraser via API unavailable — set HF_API_TOKEN in secrets.)"
 
     url = f"https://api-inference.huggingface.co/models/{model}"
     headers = {"Authorization": f"Bearer {token}"}
-
-    tone_map = {
-        "Formal": "Rewrite formally:",
-        "Friendly": "Rewrite in a friendly tone:",
-        "Concise": "Rewrite concisely:",
-        "Neutral": "",
-    }
+    tone_map = {"Formal": "Rewrite formally:", "Friendly": "Rewrite in a friendly tone:", "Concise": "Rewrite concisely:", "Neutral": ""}
     style = tone_map.get(tone or "Neutral", "")
-    payload = {
-        "inputs": f"paraphrase: {style} {text}".strip(),
-        "options": {"wait_for_model": True}
-    }
+    payload = {"inputs": f"paraphrase: {style} {text}".strip(), "options": {"wait_for_model": True}}
 
-    for _ in range(3):  # simple retry loop for cold starts
+    for _ in range(3):
         r = requests.post(url, headers=headers, data=json.dumps(payload), timeout=60)
         if r.status_code == 503:
-            import time as _t; _t.sleep(2)
+            time.sleep(2)
             continue
         r.raise_for_status()
         out = r.json()
@@ -143,18 +126,16 @@ def paraphrase_api(text: str, tone: str = "", model: str = "Vamsi/T5_Paraphrase_
         return str(out)
     return "(Paraphrase API is warming up. Try again.)"
 
-# Local (optional)
 _paraphraser = None
 _paraphraser_tokenizer = None
 _PARA_MODEL = "Vamsi/T5_Paraphrase_Paws"
 
 def _ensure_paraphraser() -> bool:
-    """Load the local paraphrase model on demand (requires transformers+torch+sentencepiece)."""
     global _paraphraser, _paraphraser_tokenizer
     if _paraphraser is not None and _paraphraser_tokenizer is not None:
         return True
     try:
-        from transformers import AutoModelForSeq2SeqLM, AutoTokenizer  # type: ignore
+        from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
         _paraphraser_tokenizer = AutoTokenizer.from_pretrained(_PARA_MODEL)
         _paraphraser = AutoModelForSeq2SeqLM.from_pretrained(_PARA_MODEL)
         return True
@@ -167,18 +148,14 @@ def paraphrase_local(text: str, beams: int = 5, max_len: int = 256, style_hint: 
     prefix = "paraphrase: " + (style_hint + " " if style_hint else "") + text
     inputs = _paraphraser_tokenizer.encode(prefix, return_tensors="pt", truncation=True)
     outputs = _paraphraser.generate(
-        inputs,
-        max_length=max_len,
-        num_beams=beams,
-        early_stopping=True,
-        no_repeat_ngram_size=3,
+        inputs, max_length=max_len, num_beams=beams, early_stopping=True, no_repeat_ngram_size=3
     )
     return _paraphraser_tokenizer.decode(outputs[0], skip_special_tokens=True)
 
-# --------------------------------------------------------------------
-# App UI
-# --------------------------------------------------------------------
-st.title("📝 Mini‑Grammarly")
+# -----------------------------------------------------------------------------
+# UI
+# -----------------------------------------------------------------------------
+st.title("📝 Mini-Grammarly")
 st.caption("Grammar, style, rewrite & plagiarism — with a clean, modern look")
 
 SUPPORTED_LANGS = {
@@ -192,35 +169,24 @@ SUPPORTED_LANGS = {
 
 with st.sidebar:
     st.header("Settings")
-    # Diagnostics
     st.caption(
-        f"LangTool pkg: {'✅' if lt else '❌'}"
-        + (f" (import error: {lt_error})" if lt_error else "")
+        f"LangTool pkg: {'✅' if lt else '❌'}" + (f" (import error: {lt_error})" if lt_error else "")
     )
     st.caption(f"HF API token: {'✅' if HF_TOKEN else '❌'}")
-    if REMOTE:
-        st.caption("Remote LT server: ✅ (from secret/env)")
-    else:
-        st.caption("Remote LT server: ❌ (using Public/Local)")
+    st.caption("Remote LT server: " + ("✅ (from secret/env)" if REMOTE else "❌ (using Public/Local)"))
 
     lang = st.selectbox("Language", list(SUPPORTED_LANGS.keys()), index=0)
     lang_code = SUPPORTED_LANGS[lang]
 
     ENGINE = st.radio(
         "Grammar engine",
-        [
-            "Public API (free, rate-limited)",
-            "Local server (no rate limits; requires Java)",
-            "Remote server (from secret/env)",
-        ],
+        ["Public API (free, rate-limited)", "Local server (Java)", "Remote server (from secret/env)"],
         index=0 if not REMOTE else 2,
         help="Public is easiest; Local needs Java; Remote uses your own LanguageTool server URL.",
     )
 
     do_rewrite = st.checkbox("Enable paraphrase/rewrite", value=False)
-    target_tone = st.selectbox(
-        "Target tone (rewrite)", ["Neutral", "Formal", "Friendly", "Concise"], index=0
-    )
+    target_tone = st.selectbox("Target tone (rewrite)", ["Neutral", "Formal", "Friendly", "Concise"], index=0)
     beams = st.slider("Paraphrase quality (beams, local only)", 2, 8, 5)
 
     st.divider()
@@ -230,11 +196,11 @@ with st.sidebar:
         "Mode",
         ["Local (upload refs / paste text)", "External API (bring your own key)"],
         index=0,
-        help="Local: compare against your uploads and pasted references; API: placeholder to wire a commercial API.",
+        help="Local: compare against your uploads and pasted references; API: wire a provider key.",
     )
     plag_thresh = st.slider("Flag similarity ≥", 0.0, 1.0, 0.35, 0.01)
     pasted_refs = st.text_area(
-        "Paste reference text(s) (optional). Separate multiple sources with a line containing only three dashes: ---",
+        "Paste reference text(s) (optional). Separate multiple sources with a line containing only `---`",
         height=120,
         placeholder="Paste any text that you want to compare against.\n---\nPaste another reference...",
     )
@@ -256,9 +222,9 @@ with c3:
 with c4:
     plag_btn = st.button("Run plagiarism check")
 
-# --------------------------------------------------------------------
-# Grammar helpers
-# --------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Grammar checking
+# -----------------------------------------------------------------------------
 @dataclass
 class Issue:
     rule: str
@@ -269,43 +235,73 @@ class Issue:
     replacements: List[str]
 
 def _lt_check_http(text: str, lang_code: str, remote_url: Optional[str]) -> Tuple[str, List[Issue]]:
-    """LanguageTool /v2/check via HTTP (public or remote)."""
+    """LanguageTool /v2/check via HTTP (public or remote) with robust fallbacks."""
+    if not isinstance(text, str) or not text.strip():
+        return text, []
+
+    # keep text sane for public endpoint
+    MAX_CHARS = 20000
+    payload_text = text[:MAX_CHARS]
+
     base = (remote_url.rstrip("/") if remote_url else "https://api.languagetool.org") + "/v2/check"
-    data = {"text": text, "language": lang_code, "enabledOnly": "true"}
-    headers = {"User-Agent": "mini-grammarly/1.0 (streamlit)"}
-    r = requests.post(base, data=data, headers=headers, timeout=30)
-    if r.status_code == 429:
-        raise APIRateLimit("Public API rate limit hit")
-    if r.status_code == 426:
-        # Some gateways respond with 426 Upgrade Required; advise user and try once more.
-        raise APIRateLimit("The public LT endpoint returned 426 Upgrade Required. Switch to HTTP fallback or Remote server.")
-    r.raise_for_status()
-    try:
-        js = r.json()
-    except Exception:
-        # Non-JSON response from proxy/CDN; surface a friendly message
-        raise APIRateLimit(f"Unexpected response from LT API: {r.text[:200]}")
-    matches = js.get("matches", [])
+    headers = {
+        "User-Agent": "mini-grammarly/1.1 (streamlit)",
+        "Accept": "application/json",
+    }
 
-    issues: List[Issue] = []
-    corrected = list(text)
-    for m in sorted(matches, key=lambda x: x.get("offset", 0), reverse=True):
-        offset = m.get("offset", 0)
-        length = m.get("length", 0)
-        message = m.get("message", "")
-        rule_id = (m.get("rule") or {}).get("id", "Rule")
-        context = (m.get("context") or {}).get("text", "")
-        repls = [rep.get("value") for rep in m.get("replacements", []) if "value" in rep]
-        issues.append(Issue(rule=rule_id, message=message, offset=offset, length=length, context=context, replacements=repls))
-        if repls:
-            suggestion = repls[0]
-            corrected[offset:offset+length] = list(suggestion)
+    def _try(language_value: str):
+        data = {
+            "text": payload_text,
+            "language": language_value,
+            "enabledOnly": "true",
+        }
+        r = requests.post(base, data=data, headers=headers, timeout=30)
+        if r.status_code == 429:
+            raise APIRateLimit("Public API rate limit hit")
+        if r.status_code >= 400:
+            try:
+                msg = r.json()
+            except Exception:
+                msg = r.text
+            raise requests.HTTPError(f"{r.status_code} {r.reason}: {msg}", response=r)
+        try:
+            return r.json()
+        except Exception:
+            raise requests.HTTPError(f"Unexpected response from LanguageTool: {r.text[:200]}", response=r)
 
-    corrected_text = "".join(corrected)
-    return corrected_text, list(reversed(issues))
+    # try chosen language; on 400 retry fallbacks
+    try_order = [lang_code]
+    if lang_code not in ("auto", "auto-en"):
+        try_order += ["auto", "auto-en", "en-US"]
+
+    last_err = None
+    for lang_try in try_order:
+        try:
+            js = _try(lang_try)
+            matches = js.get("matches", [])
+            issues: List[Issue] = []
+            corrected = list(text)
+            for m in sorted(matches, key=lambda x: x.get("offset", 0), reverse=True):
+                offset = m.get("offset", 0)
+                length = m.get("length", 0)
+                message = m.get("message", "")
+                rule_id = (m.get("rule") or {}).get("id", "Rule")
+                context = (m.get("context") or {}).get("text", "")
+                repls = [rep.get("value") for rep in m.get("replacements", []) if "value" in rep]
+                issues.append(Issue(rule=rule_id, message=message, offset=offset, length=length, context=context, replacements=repls))
+                if repls:
+                    suggestion = repls[0]
+                    corrected[offset:offset+length] = list(suggestion)
+            corrected_text = "".join(corrected)
+            return corrected_text, list(reversed(issues))
+        except requests.HTTPError as e:
+            last_err = e
+            if e.response is None or e.response.status_code not in (400,):
+                raise
+
+    raise last_err if last_err else requests.HTTPError("LanguageTool request failed with unknown error")
 
 def get_tool(lang_code: str):
-    """Return a working checker or None. If lt import failed, we use HTTP fallback in check_text()."""
     if lt is None:
         return None
     try:
@@ -314,7 +310,7 @@ def get_tool(lang_code: str):
                 return None
             return lt.LanguageTool(lang_code, remote_server=REMOTE)
         if ENGINE.startswith("Public"):
-            return lt.LanguageToolPublicAPI(lang_code)
+            return None  # we force HTTP path for Public
         return lt.LanguageTool(lang_code)  # Local (Java)
     except Exception:
         return None
@@ -322,32 +318,24 @@ def get_tool(lang_code: str):
 def check_text(text: str, lang_code: str) -> Tuple[str, List[Issue]]:
     """
     Grammar check with three modes:
-    - Public API: use HTTP endpoint (avoids 426/JSON issues)
-    - Remote server: HTTP to your LT server (LT_REMOTE_SERVER_URL)
-    - Local server: try language_tool_python (Java), else fallback to HTTP
+      - Public API: direct HTTP (avoids 426/JSON issues)
+      - Remote server: HTTP to your LT server (LT_REMOTE_SERVER_URL)
+      - Local server: try language_tool_python (Java), else HTTP
     """
-    # Public/Remote → HTTP path (most reliable on Streamlit Cloud)
     if ENGINE.startswith("Public"):
         return _lt_check_http(text, lang_code, remote_url=None)
 
     if ENGINE.startswith("Remote"):
         return _lt_check_http(text, lang_code, remote_url=REMOTE if REMOTE else None)
 
-    # Local (Java) → try library first, then HTTP fallback
     if lt is not None:
-        try:
-            tool = get_tool(lang_code)
-        except Exception:
-            tool = None
-
+        tool = get_tool(lang_code)
         if tool is not None:
             try:
                 matches = tool.check(text)
             except Exception:
-                # Library failed (e.g., 426/transport); fallback to HTTP (public)
                 return _lt_check_http(text, lang_code, remote_url=None)
 
-            # Build issues and corrected text (normalizing replacements)
             issues: List[Issue] = []
             for m in matches:
                 rep_list = getattr(m, "replacements", []) or []
@@ -375,16 +363,13 @@ def check_text(text: str, lang_code: str) -> Tuple[str, List[Issue]]:
             corrected_text = "".join(corrected)
             return corrected_text, issues
 
-    # Final fallback: Public HTTP
     return _lt_check_http(text, lang_code, remote_url=None)
-
 
 @st.cache_data(show_spinner=False, ttl=300)
 def check_text_cached(text: str, lang_code: str, engine_key: str, remote_key: str):
     return check_text(text, lang_code)
 
 def highlight_diff(before: str, after: str) -> str:
-    """Return HTML with <ins>/<del> markers to visualize changes."""
     diff = difflib.ndiff(before.split(), after.split())
     html_tokens = []
     for token in diff:
@@ -398,9 +383,9 @@ def highlight_diff(before: str, after: str) -> str:
             html_tokens.append(token[2:])
     return " ".join(html_tokens)
 
-# --------------------------------------------------------------------
-# Plagiarism helpers (Local mode)
-# --------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Plagiarism (local)
+# -----------------------------------------------------------------------------
 def _read_txt(bytes_data: bytes) -> str:
     try:
         return bytes_data.decode("utf-8")
@@ -446,8 +431,7 @@ def _extract_text_from_upload(upload) -> str:
 def _split_pasted_refs(pasted: str) -> List[str]:
     if not pasted.strip():
         return []
-    parts = []
-    current = []
+    parts, current = [], []
     for line in pasted.splitlines():
         if line.strip() == "---":
             if current:
@@ -465,16 +449,13 @@ def _cosine_similarity(a: str, b: str) -> float:
     try:
         vec = TfidfVectorizer(analyzer="char", ngram_range=(3, 5), min_df=1)
         X = vec.fit_transform([a, b])
-        sim = cosine_similarity(X[0], X[1])[0][0]
-        return float(sim)
+        return float(cosine_similarity(X[0], X[1])[0][0])
     except Exception:
         return 0.0
 
 def _highlight_overlap(a: str, b: str, min_match: int = 30) -> Tuple[str, List[str]]:
-    """Rough overlapping fragments via difflib; returns highlighted HTML and sample b fragments."""
     sm = difflib.SequenceMatcher(None, a, b)
     matches = [m for m in sm.get_matching_blocks() if m.size >= min_match]
-    # Merge close matches
     merged = []
     for m in matches:
         if merged and m.a <= merged[-1].a + merged[-1].size + 10:
@@ -482,8 +463,7 @@ def _highlight_overlap(a: str, b: str, min_match: int = 30) -> Tuple[str, List[s
             merged[-1] = difflib.Match(last.a, last.b, (m.a + m.size) - last.a)
         else:
             merged.append(m)
-    out = []
-    last = 0
+    out, last = [], 0
     matched_b = []
     for m in merged:
         out.append(a[last:m.a])
@@ -494,7 +474,6 @@ def _highlight_overlap(a: str, b: str, min_match: int = 30) -> Tuple[str, List[s
     return "".join(out), matched_b
 
 def run_local_plagiarism(target: str, ref_texts: List[Tuple[str, str]], thresh: float = 0.35):
-    """Compare target text against (name,text) refs. Returns sorted list of dict results."""
     results = []
     for name, src in ref_texts:
         if not src.strip():
@@ -512,9 +491,7 @@ def run_local_plagiarism(target: str, ref_texts: List[Tuple[str, str]], thresh: 
     results.sort(key=lambda x: x["Similarity"], reverse=True)
     return results
 
-# --------------------------------------------------------------------
-# Plagiarism report exporters
-# --------------------------------------------------------------------
+# Exports
 def _build_docx_report(target_text: str, results: List[dict]) -> bytes:
     if docx is None:
         return b""
@@ -531,21 +508,16 @@ def _build_docx_report(target_text: str, results: List[dict]) -> bytes:
         d.add_heading(f"Source: {r['Source']}  (similarity {r['Similarity']})", level=2)
         d.add_paragraph(f"Overlaps found: {r['OverlapsFound']}")
         para = d.add_paragraph()
-        # Parse <mark>...</mark> into highlighted runs
-        pieces = []
         tmp = r["HighlightedTargetHTML"].replace("<mark>", "\u0001").replace("</mark>", "\u0002")
-        buff = ""
-        marked = False
+        pieces, buff, marked = [], "", False
         for ch in tmp:
             if ch == "\u0001":
                 if buff:
-                    pieces.append((buff, False))
-                    buff = ""
+                    pieces.append((buff, False)); buff = ""
                 marked = True
             elif ch == "\u0002":
                 if buff:
-                    pieces.append((buff, True))
-                    buff = ""
+                    pieces.append((buff, True)); buff = ""
                 marked = False
             else:
                 buff += ch
@@ -563,7 +535,7 @@ def _build_docx_report(target_text: str, results: List[dict]) -> bytes:
         if r["OverlapSamples"]:
             d.add_paragraph("Sample matching fragments from source:")
             for frag in r["OverlapSamples"]:
-                d.add_paragraph(f"• {frag}", style=None)
+                d.add_paragraph(f"• {frag}")
 
     bio = io.BytesIO()
     d.save(bio)
@@ -587,22 +559,17 @@ def _build_pdf_report(target_text: str, results: List[dict]) -> bytes:
         if y < 2*cm:
             c.showPage()
             y = height - 2*cm
-        if bold:
-            c.setFont("Helvetica-Bold", 10)
-        else:
-            c.setFont("Helvetica", 10)
+        c.setFont("Helvetica-Bold" if bold else "Helvetica", 10)
         c.drawString(x, y, text)
         y -= line_h
 
     draw_line("Plagiarism Report", bold=True)
     draw_line(f"Matches above threshold: {len(results)}")
     y -= 6
-
     draw_line("Checked text:", bold=True)
     for ln in textwrap.wrap(target_text, width=95):
         draw_line(ln)
     y -= 6
-
     for r in results:
         draw_line(f"Source: {r['Source']}  (similarity {r['Similarity']})", bold=True)
         draw_line(f"Overlaps found: {r['OverlapsFound']}")
@@ -617,26 +584,19 @@ def _build_pdf_report(target_text: str, results: List[dict]) -> bytes:
     c.save()
     return bio.getvalue()
 
-# --------------------------------------------------------------------
-# External API Plagiarism (stub)
-# --------------------------------------------------------------------
 def run_external_plagiarism_stub(target: str, api_key: str) -> List[dict]:
-    """
-    Placeholder for wiring a commercial plagiarism API.
-    Return list of dicts like run_local_plagiarism().
-    """
     return []
 
-# --------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # Actions
-# --------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 if run and text.strip():
     try:
         fixed, issues = check_text_cached(text, lang_code, ENGINE, REMOTE)
     except APIRateLimit:
         st.error(
             "You’ve hit the free LanguageTool API rate limit.\n\n"
-            "• Try again later (Public API), or\n"
+            "• Try again later, or\n"
             "• Set LT_REMOTE_SERVER_URL for your own server, or\n"
             "• Use Local server on your PC (Java required)."
         )
@@ -657,20 +617,11 @@ if run and text.strip():
         for i, it in enumerate(issues, 1):
             bad = text[it.offset : it.offset + it.length]
             top_suggestion = it.replacements[0] if it.replacements else "(none)"
-            rows.append(
-                {
-                    "#": i,
-                    "Rule": it.rule,
-                    "Message": it.message,
-                    "Text": bad,
-                    "Suggestion": top_suggestion,
-                    "Pos": f"{it.offset}:{it.offset + it.length}",
-                }
-            )
+            rows.append({"#": i, "Rule": it.rule, "Message": it.message, "Text": bad, "Suggestion": top_suggestion,
+                         "Pos": f"{it.offset}:{it.offset + it.length}"})
         try:
             import pandas as pd
-            df = pd.DataFrame(rows)
-            st.dataframe(df, use_container_width=True)
+            st.dataframe(pd.DataFrame(rows), use_container_width=True)
         except Exception:
             for r in rows:
                 st.write(r)
@@ -727,11 +678,10 @@ if plag_btn and enable_plag and text.strip():
             results = run_local_plagiarism(text, references, thresh=plag_thresh)
 
     else:
-        api_key = _get_secret("PLAG_API_KEY", "")
-        if not api_key:
+        if not PLAG_API_KEY:
             st.info("Set PLAG_API_KEY in secrets to enable External API mode.")
         else:
-            results = run_external_plagiarism_stub(text, api_key)
+            results = run_external_plagiarism_stub(text, PLAG_API_KEY)
 
     if not results:
         st.success("No suspicious similarity above the threshold.")
@@ -757,19 +707,21 @@ if plag_btn and enable_plag and text.strip():
         colA, colB = st.columns(2)
         with colA:
             docx_bytes = _build_docx_report(text, results)
-            st.download_button("Download DOCX report", docx_bytes, "plagiarism_report.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", disabled=(not docx_bytes))
+            st.download_button("Download DOCX report", docx_bytes, "plagiarism_report.docx",
+                               "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                               disabled=(not docx_bytes))
         with colB:
             pdf_bytes = _build_pdf_report(text, results)
-            st.download_button("Download PDF report", pdf_bytes, "plagiarism_report.pdf", "application/pdf", disabled=(not pdf_bytes))
-
+            st.download_button("Download PDF report", pdf_bytes, "plagiarism_report.pdf", "application/pdf",
+                               disabled=(not pdf_bytes))
 
 st.markdown(
     '<div class="app-footer">Made with Streamlit · LanguageTool · Hugging Face · scikit-learn</div>',
     unsafe_allow_html=True
 )
+
 st.caption(
-    "Grammar engines: Public API (rate-limited), Local (needs Java), Remote (set LT_REMOTE_SERVER_URL). "
+    "Grammar engines: Public API (rate-limited), Local (Java), Remote (set LT_REMOTE_SERVER_URL). "
     "Paraphrasing: uses Hugging Face Inference API via HF_API_TOKEN; falls back to local Transformers if installed. "
-    "Plagiarism (Local): compares against uploads/pasted refs using TF-IDF cosine similarity and overlap highlights. "
-    "DOCX/PDF report export built-in. External API stub available (set PLAG_API_KEY)."
+    "Plagiarism (Local): compares against uploads/pasted refs with TF-IDF cosine similarity and overlap highlights."
 )
