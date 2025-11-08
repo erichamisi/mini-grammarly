@@ -5,6 +5,6 @@ textstat==0.7.4
 pandas>=2.0,<3.0
 
 # Optional paraphraser (comment these out if you don’t need rewrite feature)
-# transformers>=4.44.0
-# sentencepiece>=0.2.0
-# torch>=2.3.0
+ transformers>=4.44.0
+ sentencepiece>=0.2.0
+ torch>=2.4.1
