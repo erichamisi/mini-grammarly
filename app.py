@@ -320,15 +320,34 @@ def get_tool(lang_code: str):
         return None
 
 def check_text(text: str, lang_code: str) -> Tuple[str, List[Issue]]:
-    if lt is not None and not ENGINE.startswith('Public'):
-        tool = get_tool(lang_code)
+    """
+    Grammar check with three modes:
+    - Public API: use HTTP endpoint (avoids 426/JSON issues)
+    - Remote server: HTTP to your LT server (LT_REMOTE_SERVER_URL)
+    - Local server: try language_tool_python (Java), else fallback to HTTP
+    """
+    # Public/Remote → HTTP path (most reliable on Streamlit Cloud)
+    if ENGINE.startswith("Public"):
+        return _lt_check_http(text, lang_code, remote_url=None)
+
+    if ENGINE.startswith("Remote"):
+        return _lt_check_http(text, lang_code, remote_url=REMOTE if REMOTE else None)
+
+    # Local (Java) → try library first, then HTTP fallback
+    if lt is not None:
+        try:
+            tool = get_tool(lang_code)
+        except Exception:
+            tool = None
+
         if tool is not None:
-                        try:
+            try:
                 matches = tool.check(text)
             except Exception:
-                # Fallback to HTTP check if the library path fails (e.g., 426 Upgrade Required)
-                return _lt_check_http(text, lang_code, REMOTE if ENGINE.startswith('Remote') else None)
+                # Library failed (e.g., 426/transport); fallback to HTTP (public)
+                return _lt_check_http(text, lang_code, remote_url=None)
 
+            # Build issues and corrected text (normalizing replacements)
             issues: List[Issue] = []
             for m in matches:
                 rep_list = getattr(m, "replacements", []) or []
@@ -343,6 +362,7 @@ def check_text(text: str, lang_code: str) -> Tuple[str, List[Issue]]:
                         replacements=repl,
                     )
                 )
+
             corrected = list(text)
             for m in sorted(matches, key=lambda x: getattr(x, "offset", 0), reverse=True):
                 rep_list = getattr(m, "replacements", []) or []
@@ -351,11 +371,13 @@ def check_text(text: str, lang_code: str) -> Tuple[str, List[Issue]]:
                     start = getattr(m, "offset", 0)
                     end = start + getattr(m, "errorLength", 0)
                     corrected[start:end] = list(suggestion)
+
             corrected_text = "".join(corrected)
             return corrected_text, issues
 
-    remote_url = REMOTE if ENGINE.startswith("Remote") else None
-    return _lt_check_http(text, lang_code, remote_url)
+    # Final fallback: Public HTTP
+    return _lt_check_http(text, lang_code, remote_url=None)
+
 
 @st.cache_data(show_spinner=False, ttl=300)
 def check_text_cached(text: str, lang_code: str, engine_key: str, remote_key: str):
